@@ -15,6 +15,7 @@ from collections import namedtuple
 from typing import List, Tuple
 
 Point2D = namedtuple('Point2D', 'x y')
+GCodeLine = namedtuple('GCodeLine', 'x y z e f')
 
 def bilinear_interpolation(Q11: Point2D, Q22: Point2D, h_Q11, h_Q21, h_Q12, h_Q22, targetPoint: Point2D) -> float:
     return 1 / ((Q22.x-Q11.x) * (Q22.y-Q11.y)) * (\
@@ -29,6 +30,13 @@ def getXY(currentLine: str) -> Point2D:
     elementX = searchX.group(1)
     elementY = searchY.group(1)
     return Point2D(float(elementX), float(elementY))
+
+def parseGCode(currentLine: str) -> GCodeLine:
+    thisLine = re.compile('(?i)^[gG0-3]{1,3}(?:\s+x-?(?P<x>[0-9.]{1,15})|\s+y-?(?P<y>[0-9.]{1,15})|\s+z-?(?P<z>[0-9.]{1,15})|\s+e-?(?P<e>[0-9.]{1,15})|\s+f-?(?P<f>[0-9.]{1,15}))*')
+    lineEntries = thisLine.match(currentLine)
+    if lineEntries:
+        return GCodeLine(lineEntries.group('x'), lineEntries.group('y'), lineEntries.group('z'), lineEntries.group('e'), lineEntries.group('f'))
+    
 
 def getDistance(p1: Point2D, p2: Point2D) -> float:
     return ((p1.x - p2.x)**2 + (p1.y - p2.y)**2) ** 0.5
@@ -90,7 +98,7 @@ def writeLine(G, X, Y, Z, F = None, E = None):
         outputSting = outputSting + " F" + str(int(F))
     outputFile.write(outputSting + "\n")
 
-INPUT_FILE_NAME = "fullflat.gcode"
+INPUT_FILE_NAME = "test2.gcode"
 OUTPUT_FILE_NAME = "RML_" + INPUT_FILE_NAME 
 
 CORNER_LOWER_LEFT = Point2D(30,30)
@@ -100,8 +108,8 @@ EXTRAPOLATE = 1 #Extrapolate beyond the measured points (e.g. corners)
 DISCRETIZATION_LENGTH = 10 # [mm] Subdivision Length
 FADE_LAYERS = 10 # Number of layers in which the leveling is used and slowly faded to zero
 
-# ENDER 3 60°C: HEIGHT_VALUES = [.1, .05, .05,   .2, 0.23, .22,  .17, .17, .15] #measured distances from the nozzle at the leveling points
-HEIGHT_VALUES = [10, 5, 5,   20, 0, 22,  17, 17, 15]
+LEVELING_OFFSET = 0.1 #offset used during leveling e.g. what was the z-height when you measured the HEIGHT_VALUES
+HEIGHT_VALUES = [.15, .18, .08,   .12, 0.20, .17,  .0, .08, .0] #measured distances from the nozzle at the leveling points
 
 RANGE_X = CORNER_UPPER_RIGHT.x - CORNER_LOWER_LEFT.x
 RANGE_Y = CORNER_UPPER_RIGHT.y - CORNER_LOWER_LEFT.y
@@ -122,45 +130,49 @@ with open(INPUT_FILE_NAME, "r") as gcodeFile, open(OUTPUT_FILE_NAME, "w+") as ou
             if currentLine[0] == ";":
                 outputFile.write(currentLine)
                 continue
-            if " X" in currentLine and " Y" in currentLine and ("G1" in currentLine or "G0" in currentLine) and currentLayer <= FADE_LAYERS:
-                currentPosition = getXY(currentLine)
-                if " E" in currentLine:
-                    extrusionLength = float(re.search(r"E(\d*\.?\d*)", currentLine).group(1))
-                else:
-                    extrusionLength = None
+            currentLineCommands = parseGCode(currentLine)
+            #if " X" in currentLine and " Y" in currentLine and ("G1" in currentLine or "G0" in currentLine) and currentLayer <= FADE_LAYERS:
+            if currentLineCommands and currentLayer <= FADE_LAYERS:
+                currentPosition = Point2D(float(currentLineCommands.x), float(currentLineCommands.y))
+                #if " E" in currentLine:
+                #if currentLineCommands.e:
+                #   extrusionLength = float(re.search(r"E(\d*\.?\d*)", currentLine).group(1))
+                #else:
+                #    extrusionLength = None
                     
-                if " F" in currentLine:
-                    outputFile.write("G1 F" + re.search(r"F(\d*\.?\d*)", currentLine).group(1) + "\n")
-                    
+                if currentLineCommands.f:
+                    outputFile.write("G1 F" + float(currentLineCommands.f) + "\n")
                 segmentLength = getDistance(currentPosition, lastPosition)
                 if (segmentLength > DISCRETIZATION_LENGTH):
                     discretizationSteps = segmentLength / DISCRETIZATION_LENGTH
                     segementDirection = Point2D((currentPosition.x - lastPosition.x) / segmentLength * DISCRETIZATION_LENGTH, \
                                                 (currentPosition.y - lastPosition.y) / segmentLength * DISCRETIZATION_LENGTH)
-                    if extrusionLength is not None:
-                        segmentExtrusion = extrusionLength * DISCRETIZATION_LENGTH / segmentLength
+                    #if extrusionLength is not None:
+                    if currentLineCommands.e:
+                        segmentExtrusion = float(currentLineCommands.e) * DISCRETIZATION_LENGTH / segmentLength
                     else:
                         segmentExtrusion = None
                     for step in range(int(discretizationSteps)):
                         segmentEnd = Point2D(lastPosition.x + segementDirection.x, lastPosition.y + segementDirection.y)                    
                         zOffset = getZOffset(segmentEnd, currentLayer)
                         
-                        writeLine(1,segmentEnd.x, segmentEnd.y, currentZ - zOffset,None,segmentExtrusion)
+                        writeLine(1,segmentEnd.x, segmentEnd.y, currentZ - zOffset + LEVELING_OFFSET,None,segmentExtrusion)
                         lastPosition = segmentEnd
                     zOffset = getZOffset(currentPosition, currentLayer)
    
-                    if extrusionLength is not None:
+                    #if extrusionLength is not None:
+                    if currentLineCommands.e:
                         #segmentExtrusion = extrusionLength * (DISCRETIZATION_LENGTH % segmentLength) / segmentLength
-                        segmentExtrusion = extrusionLength / discretizationSteps * (discretizationSteps % 1)
+                        segmentExtrusion = float(currentLineCommands.e) / discretizationSteps * (discretizationSteps % 1)
                     else:
                         segmentExtrusion = None
-                    writeLine(1,currentPosition.x, currentPosition.y, currentZ - zOffset,None,segmentExtrusion)
+                    writeLine(1,currentPosition.x, currentPosition.y, currentZ - zOffset + LEVELING_OFFSET,None,segmentExtrusion)
                     lastPosition = currentPosition
                     continue
                 
                 zOffset = getZOffset(currentPosition, currentLayer)    
             
-                writeLine(1,currentPosition.x, currentPosition.y, currentZ - zOffset,None,extrusionLength)
+                writeLine(1,currentPosition.x, currentPosition.y, currentZ - zOffset + LEVELING_OFFSET,None,extrusionLength)
                 lastPosition = currentPosition
                     
             else:
